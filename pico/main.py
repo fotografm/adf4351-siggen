@@ -26,7 +26,7 @@ from machine import Pin
 
 AP_SSID = "ADF4351"
 AP_PASS = "reticulum"
-AP_IP   = "10.42.0.1"
+AP_IP   = "192.168.4.1"
 AP_MASK = "255.255.255.0"
 
 
@@ -171,11 +171,14 @@ def _cmd_rf(arg):
 
 
 def _cmd_status(_arg):
-    return "STATUS:FREQ={},PWR={},RF={},{}".format(
+    return "STATUS:FREQ={},PWR={},RF={},WIFI={},{}".format(
         _freq, _power, "ON" if _rf_on else "OFF",
+        _wifi_status,
         "LOCKED" if _ld.value() else "UNLOCKED"
     )
 
+
+_wifi_status = "starting"
 
 _CMDS = {"FREQ": _cmd_freq, "PWR": _cmd_pwr, "RF": _cmd_rf, "STATUS": _cmd_status}
 
@@ -248,15 +251,16 @@ input{background:#18183a;color:#fff;border:1px solid #334488;border-radius:4px;p
 <div class="st" id="st">Connecting...</div>
 <script>
 const S=[12500,100000,1000000,10000000];
-let f=446100000,si=0,pi=3,rf=true;
+let f=0,si=0,pi=3,rf=true;
 const $=id=>document.getElementById(id);
 function cmd(c){
   fetch('/cmd',{method:'POST',body:c})
-  .then(r=>r.text()).then(t=>$('st').textContent=c+' → '+t)
-  .catch(()=>$('st').textContent='No response');
+  .then(r=>r.text()).then(t=>$('st').textContent=c+' -> '+t)
+  .catch(()=>$('st').textContent='No response - retry in 2s');
 }
 function ss(i){si=i;[...$('sr').children].forEach((b,j)=>b.classList.toggle('sel',i==j));}
 function go(d){
+  if(!f)return;
   f=Math.max(144000000,Math.min(1300000000,f+d*S[si]));
   $('freq').textContent=(f/1e6).toFixed(6)+' MHz';cmd('FREQ:'+f);
 }
@@ -291,7 +295,7 @@ setInterval(poll,2000);poll();
 
 async def _http_handler(reader, writer):
     try:
-        req_line = (await asyncio.wait_for(reader.readline(), 5)).decode()
+        req_line = (await reader.readline()).decode()
         parts = req_line.split()
         if len(parts) < 2:
             return
@@ -299,7 +303,7 @@ async def _http_handler(reader, writer):
 
         clen = 0
         while True:
-            h = (await asyncio.wait_for(reader.readline(), 5)).decode().strip()
+            h = (await reader.readline()).decode().strip()
             if not h:
                 break
             if h.lower().startswith("content-length:"):
@@ -307,11 +311,11 @@ async def _http_handler(reader, writer):
 
         body = ""
         if method == "POST" and clen > 0:
-            body = (await asyncio.wait_for(reader.read(clen), 5)).decode().strip()
+            body = (await reader.read(clen)).decode().strip()
 
         if path in ("/", "/index.html"):
             data = _HTML.encode()
-            writer.write("HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n".format(len(data)).encode())
+            writer.write("HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n".format(len(data)).encode())
             writer.write(data)
 
         elif path == "/status":
@@ -325,9 +329,8 @@ async def _http_handler(reader, writer):
 
         elif path == "/cmd" and method == "POST":
             resp = _execute(body)
-            print("[WEB] {} -> {}".format(body, resp))
             data = resp.encode()
-            writer.write("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n".format(len(data)).encode())
+            writer.write("HTTP/1.0 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\r\n".format(len(data)).encode())
             writer.write(data)
 
         else:
@@ -339,7 +342,6 @@ async def _http_handler(reader, writer):
         pass
     finally:
         writer.close()
-        await writer.wait_closed()
 
 
 # ── USB serial task ───────────────────────────────────────────────────────────
@@ -369,20 +371,32 @@ async def _usb_task():
 # ── WiFi AP + web server task ─────────────────────────────────────────────────
 
 async def _wifi_task():
-    ap = network.WLAN(network.AP_IF)
-    ap.active(True)
-    ap.config(ssid=AP_SSID, password=AP_PASS)
-    ap.ifconfig((AP_IP, AP_MASK, AP_IP, AP_IP))
+    global _wifi_status
+    try:
+        ap = network.WLAN(network.AP_IF)
+        ap.active(True)
 
-    for _ in range(50):
-        if ap.active():
-            break
-        await asyncio.sleep_ms(100)
+        for _ in range(50):
+            if ap.active():
+                break
+            await asyncio.sleep_ms(100)
 
-    print("AP ready: SSID={} IP={}".format(AP_SSID, AP_IP))
+        ap.config(ssid=AP_SSID, password=AP_PASS)
+        ap.ifconfig((AP_IP, AP_MASK, AP_IP, AP_IP))
+        await asyncio.sleep_ms(200)
 
-    server = await asyncio.start_server(_http_handler, "0.0.0.0", 80)
-    await server.wait_closed()
+        actual_ip = ap.ifconfig()[0]
+        _wifi_status = "up:" + actual_ip
+
+        await asyncio.start_server(_http_handler, "0.0.0.0", 80)
+        _wifi_status = "listening:" + actual_ip
+
+    except Exception as e:
+        _wifi_status = "err:" + str(e)
+        return
+
+    while True:
+        await asyncio.sleep_ms(1000)
 
 
 # ── Boot + main ───────────────────────────────────────────────────────────────
