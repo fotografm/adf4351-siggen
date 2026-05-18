@@ -315,7 +315,7 @@ async def _http_handler(reader, writer):
 
         if path in ("/", "/index.html"):
             data = _HTML.encode()
-            writer.write("HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n".format(len(data)).encode())
+            writer.write("HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\n\r\n".format(len(data)).encode())
             writer.write(data)
 
         elif path == "/status":
