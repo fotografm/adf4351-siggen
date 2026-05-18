@@ -21,7 +21,6 @@
 
 import sys
 import time
-import uselect
 from machine import Pin
 
 
@@ -156,6 +155,12 @@ def _locked():
 
 
 def _ok():
+    # Poll LD for up to 50 ms; ADF4351 typically locks in 5-20 ms
+    deadline = time.ticks_add(time.ticks_ms(), 50)
+    while not _ld.value():
+        if time.ticks_diff(deadline, time.ticks_ms()) <= 0:
+            break
+        time.sleep_ms(1)
     print("OK:" + _locked())
 
 
@@ -177,19 +182,11 @@ def _cmd_freq(arg):
         print("ERR:frequency out of range (approx 34-4400 MHz)")
         return
 
-    # If the output divider changes, update R4 before R0 so the VCO
-    # band-select sweeps with the correct divider already in place.
-    old_div = (_regs[4] >> 20) & 0x7
-    new_div = (regs[4]  >> 20) & 0x7
-
     _freq = freq
     _regs = list(regs)
 
-    if old_div != new_div:
-        _write_reg(regs[4])
-        time.sleep_us(20)
-
-    _write_reg(regs[0])   # R0 is double-buffered; writing it triggers the update
+    # Full R5→R0 write guarantees correct divider order and re-arms band-select
+    _write_all(regs)
     _ok()
 
 
@@ -245,6 +242,7 @@ def _dispatch(line):
     line = line.strip()
     if not line:
         return
+    print("> " + line)
     upper = line.upper()
     if ":" in upper:
         cmd, arg = upper.split(":", 1)
@@ -268,15 +266,6 @@ time.sleep_ms(10)   # allow PLL to acquire lock before accepting commands
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
-_poll = uselect.poll()
-_poll.register(sys.stdin, uselect.POLLIN)
-
-_buf = ""
 while True:
-    if _poll.poll(100):        # 100 ms timeout keeps the loop responsive
-        c = sys.stdin.read(1)
-        if c in ("\r", "\n"):
-            _dispatch(_buf)
-            _buf = ""
-        else:
-            _buf += c
+    line = sys.stdin.readline()   # blocks until \n; reliable over USB CDC
+    _dispatch(line)
