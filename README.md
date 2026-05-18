@@ -6,6 +6,8 @@ An ADF4351 PLL synthesiser module is controlled by a Raspberry Pi Pico 2W over b
 The Pico exposes a simple USB serial command protocol; a PyQt5 desktop GUI on Linux provides
 frequency tuning, power control, and live lock-detect monitoring.
 
+![Signal generator GUI](docs/assets/screenshot.png)
+
 ---
 
 ## Hardware
