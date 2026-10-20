@@ -14,8 +14,10 @@ dialout group:  sudo usermod -aG dialout $USER  (then log out and back in).
 """
 
 import sys
+import glob
 import queue
 import serial
+import serial.tools.list_ports
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout,
@@ -26,7 +28,6 @@ from PyQt5.QtGui import QFont
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-PORT       = "/dev/ttyACM0"
 BAUD       = 115200
 FREQ_MIN   = 144_000_000
 FREQ_MAX   = 1_300_000_000
@@ -62,6 +63,22 @@ LOCK_G     = "#00dd55"
 LOCK_R     = "#ee2222"
 FG         = "#ffffff"
 DIM        = "#7799aa"
+
+
+def _detect_port():
+    """Return the first ttyACM* port, or ttyUSB* as fallback, or None."""
+    for port in serial.tools.list_ports.comports():
+        if "ttyACM" in port.device:
+            return port.device
+    for port in serial.tools.list_ports.comports():
+        if "ttyUSB" in port.device:
+            return port.device
+    # fallback: glob
+    for pattern in ("/dev/ttyACM*", "/dev/ttyUSB*"):
+        matches = sorted(glob.glob(pattern))
+        if matches:
+            return matches[0]
+    return None
 
 
 def _css(n, h, fg=FG):
@@ -154,6 +171,7 @@ class MainWindow(QMainWindow):
         self._rf_on     = True
         self._connected = False
         self._step_idx  = 0
+        self._port      = ""
         self._step_btns: list[QPushButton] = []
         self._pwr_btns:  list[QPushButton] = []
 
@@ -356,11 +374,13 @@ class MainWindow(QMainWindow):
 
     def _refresh_con_btn(self):
         if self._connected:
-            self._con_btn.setText("● CONNECTED — DISCONNECT")
+            self._con_btn.setText(f"● CONNECTED {self._port} — DISCONNECT")
             self._con_btn.setStyleSheet(_css(CON_N, CON_H))
         else:
-            self._con_btn.setText(f"CONNECT  {PORT}")
-            self._con_btn.setStyleSheet(_css(DIS_N, DIS_H))
+            port = _detect_port()
+            label = port if port else "no device found"
+            self._con_btn.setText(f"CONNECT  {label}")
+            self._con_btn.setStyleSheet(_css(CON_N if port else "#555555", DIS_H))
 
     def _set_lock(self, locked: bool):
         if locked:
@@ -383,9 +403,13 @@ class MainWindow(QMainWindow):
             self._set_lock(False)
             self._set_status("Disconnected")
         else:
-            if self._thread.open(PORT):
+            port = _detect_port()
+            if not port:
+                self._set_status("No serial device found — is the Pico plugged in?")
+            elif self._thread.open(port):
+                self._port = port
                 self._connected = True
-                self._set_status(f"Connected to {PORT}")
+                self._set_status(f"Connected to {port}")
                 self._thread.send("STATUS")
                 self._poll.start(POLL_MS)
         self._refresh_con_btn()

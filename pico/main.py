@@ -18,6 +18,7 @@ import sys
 import time
 import select
 import network
+import micropython
 import uasyncio as asyncio
 from machine import Pin
 
@@ -36,10 +37,11 @@ _sck  = Pin(2, Pin.OUT, value=0)
 _mosi = Pin(3, Pin.OUT, value=0)
 _le   = Pin(4, Pin.OUT, value=0)
 _ce   = Pin(5, Pin.OUT, value=1)
-_ld   = Pin(6, Pin.IN)
+_ld   = Pin(6, Pin.IN, Pin.PULL_UP)
 
 
 def _write_reg(val):
+    irq = micropython.disable_irq()
     _le.low()
     for bit in range(31, -1, -1):
         _sck.low()
@@ -49,6 +51,7 @@ def _write_reg(val):
     _le.high()
     time.sleep_us(1)
     _le.low()
+    micropython.enable_irq(irq)
 
 
 def _write_all(regs):
@@ -67,10 +70,11 @@ _BAND_DIV = 200
 
 # ── Mutable state ─────────────────────────────────────────────────────────────
 
-_freq  = 144_000_000
-_power = 3
-_rf_on = True
-_regs  = [0] * 6
+_freq      = 144_000_000
+_power     = 3
+_rf_on     = True
+_regs      = [0] * 6
+_last_body = ""
 
 
 # ── Register calculation ──────────────────────────────────────────────────────
@@ -116,7 +120,7 @@ def _build(freq, power, rf_on):
 # ── Command execution (always returns a response string, never prints) ────────
 
 def _wait_lock():
-    deadline = time.ticks_add(time.ticks_ms(), 50)
+    deadline = time.ticks_add(time.ticks_ms(), 200)
     while not _ld.value():
         if time.ticks_diff(deadline, time.ticks_ms()) <= 0:
             break
@@ -171,10 +175,11 @@ def _cmd_rf(arg):
 
 
 def _cmd_status(_arg):
-    return "STATUS:FREQ={},PWR={},RF={},WIFI={},{}".format(
+    return "STATUS:FREQ={},PWR={},RF={},WIFI={},{},LAST_CMD={}".format(
         _freq, _power, "ON" if _rf_on else "OFF",
         _wifi_status,
-        "LOCKED" if _ld.value() else "UNLOCKED"
+        "LOCKED" if _ld.value() else "UNLOCKED",
+        _last_body or "(none)"
     )
 
 
@@ -246,12 +251,12 @@ input{background:#18183a;color:#fff;border:1px solid #334488;border-radius:4px;p
 </div>
 <div class="lbl">RF output</div>
 <div class="row">
-<button class="ron" id="rfb" onclick="tr()">&#9679; RF ON</button>
+<button class="ron" id="rfb" onclick="rfset(!rf)">DISABLE RF</button>
 </div>
 <div class="st" id="st">Connecting...</div>
 <script>
 const S=[12500,100000,1000000,10000000];
-let f=0,si=0,pi=3,rf=true;
+let f=0,si=0,pi=3,rf=true,prev_locked=false;
 const $=id=>document.getElementById(id);
 function cmd(c){
   fetch('/cmd',{method:'POST',body:c})
@@ -273,18 +278,22 @@ function sd(){
 function sp(p){
   pi=p;[...$('pr').children].forEach((b,j)=>b.classList.toggle('psel',p==j));cmd('PWR:'+p);
 }
-function tr(){
-  rf=!rf;let b=$('rfb');
-  b.textContent=rf?'● RF ON':'○ RF OFF';
+function rfset(on){
+  rf=on;let b=$('rfb');
+  b.textContent=rf?'DISABLE RF':'ENABLE RF';
   b.className=rf?'ron':'rof';cmd('RF:'+(rf?'ON':'OFF'));
 }
 function poll(){
   fetch('/status').then(r=>r.json()).then(d=>{
+    let just_locked=d.locked&&!prev_locked;
+    prev_locked=d.locked;
     f=d.freq;$('freq').textContent=(d.freq/1e6).toFixed(6)+' MHz';
     let l=$('lk');l.textContent=d.locked?'● LOCKED':'● UNLOCKED';
     l.className='lk '+(d.locked?'on':'off');
     if(d.power!=pi){pi=d.power;[...$('pr').children].forEach((b,j)=>b.classList.toggle('psel',pi==j));}
-    if(d.rf!=rf){rf=d.rf;let b=$('rfb');b.textContent=rf?'● RF ON':'○ RF OFF';b.className=rf?'ron':'rof';}
+    if(d.rf!=rf){rf=d.rf;let b=$('rfb');b.textContent=rf?'DISABLE RF':'ENABLE RF';b.className=rf?'ron':'rof';}
+    $('st').textContent='fw recv: '+(d.last_cmd||'(none)');
+    if(just_locked&&rf){cmd('RF:ON');}
   }).catch(()=>{});
 }
 setInterval(poll,2000);poll();
@@ -294,6 +303,7 @@ setInterval(poll,2000);poll();
 # ── HTTP server ───────────────────────────────────────────────────────────────
 
 async def _http_handler(reader, writer):
+    global _last_body
     try:
         req_line = (await reader.readline()).decode()
         parts = req_line.split()
@@ -315,19 +325,21 @@ async def _http_handler(reader, writer):
 
         if path in ("/", "/index.html"):
             data = _HTML.encode()
-            writer.write("HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\n\r\n".format(len(data)).encode())
+            writer.write("HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nExpires: 0\r\nContent-Length: {}\r\n\r\n".format(len(data)).encode())
             writer.write(data)
 
         elif path == "/status":
-            data = '{{"freq":{},"power":{},"rf":{},"locked":{}}}'.format(
+            data = '{{"freq":{},"power":{},"rf":{},"locked":{},"last_cmd":"{}"}}'.format(
                 _freq, _power,
                 "true" if _rf_on else "false",
-                "true" if _ld.value() else "false"
+                "true" if _ld.value() else "false",
+                _last_body.replace('"', "'")
             ).encode()
             writer.write("HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n".format(len(data)).encode())
             writer.write(data)
 
         elif path == "/cmd" and method == "POST":
+            _last_body = body
             resp = _execute(body)
             data = resp.encode()
             writer.write("HTTP/1.0 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\r\n".format(len(data)).encode())
